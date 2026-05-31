@@ -1,0 +1,112 @@
+#!/bin/zsh
+# SilenceOnLogin v2.7-desktop-ready-fast
+# Purpose:
+#   After login/restart, wait until desktop services are ready,
+#   then rapidly and politely close visible startup apps for a short window.
+#
+# Behavior:
+#   - Does NOT force-kill user apps.
+#   - Does NOT use Notification Center Clear All.
+#   - Protects MagicCut/MagicQt and important helper apps.
+#   - Uses normal Command+Q through System Events.
+#   - Runs cleanup only during the first few seconds after desktop readiness.
+
+LOG="$HOME/Library/Logs/SilenceOnLogin.log"
+LOCKDIR="/tmp/com.nick.silenceonlogin.lock"
+
+mkdir -p "$(dirname "$LOG")"
+
+if ! mkdir "$LOCKDIR" 2>/dev/null; then
+  echo "----- $(date) SilenceOnLogin v2.7 skipped: already running -----" >> "$LOG"
+  exit 0
+fi
+
+cleanup_lock() {
+  rmdir "$LOCKDIR" 2>/dev/null || true
+}
+trap cleanup_lock EXIT
+
+clear_notifications() {
+  echo "Clearing notification banners..."
+  /usr/bin/killall NotificationCenter 2>/dev/null || true
+  /usr/bin/killall usernoted 2>/dev/null || true
+}
+
+desktop_ready() {
+  /usr/bin/pgrep -x Finder >/dev/null 2>&1 || return 1
+  /usr/bin/pgrep -x Dock >/dev/null 2>&1 || return 1
+  /usr/bin/pgrep -x SystemUIServer >/dev/null 2>&1 || return 1
+  /usr/bin/osascript -e 'tell application "System Events" to count application processes' >/dev/null 2>&1 || return 1
+  return 0
+}
+
+close_visible_apps() {
+  echo "Closing visible apps with normal Command+Q..."
+
+  /usr/bin/osascript <<'APPLESCRIPT'
+set protectedNames to {"Finder", "System Events", "loginwindow", "Dock", "Control Center", "NotificationCenter", "WindowManager", "Spotlight", "TextInputMenuAgent", "SilenceOnLogin", "MagicCut", "MagicQt", "Magic Quit", "MagicQ", "Mac Mouse Fix Helper", "BetterTouchTool", "Logi Options+", "Logi Options", "Karabiner-Elements", "Karabiner-EventViewer", "Rectangle", "AltTab", "Raycast", "Terminal"}
+
+tell application "System Events"
+    set visibleApps to name of every application process whose background only is false
+
+    repeat with appName in visibleApps
+        set appNameText to appName as text
+
+        if protectedNames does not contain appNameText then
+            try
+                tell application process appNameText
+                    set frontmost to true
+                end tell
+
+                delay 0.25
+                keystroke "q" using command down
+                delay 0.45
+            end try
+        end if
+    end repeat
+end tell
+APPLESCRIPT
+
+  echo "Close visible apps AppleScript exit code: $?"
+}
+
+{
+  echo "----- $(date) SilenceOnLogin v2.7-desktop-ready-fast started -----"
+
+  # Prevent macOS from reopening previous app windows after restart/login.
+  defaults write -g ApplePersistence -bool no 2>/dev/null || true
+  defaults write com.apple.loginwindow TALLogoutSavesState -bool false 2>/dev/null || true
+
+  echo "Waiting for desktop readiness..."
+
+  READY=0
+  i=1
+  while [ "$i" -le 10 ]; do
+    if desktop_ready; then
+      READY=1
+      echo "Desktop ready detected on check $i/10"
+      break
+    fi
+
+    echo "Desktop not ready yet: check $i/10"
+    sleep 1
+    i=$((i + 1))
+  done
+
+  if [ "$READY" -ne 1 ]; then
+    echo "Desktop readiness not confirmed within 10 seconds. Running cleanup anyway."
+  fi
+
+  ROUND=1
+  while [ "$ROUND" -le 7 ]; do
+    echo "Fast cleanup round $ROUND/7"
+    close_visible_apps
+    clear_notifications
+    sleep 1
+    ROUND=$((ROUND + 1))
+  done
+
+  echo "----- $(date) SilenceOnLogin v2.7-desktop-ready-fast finished -----"
+} >> "$LOG" 2>&1
+
+exit 0
